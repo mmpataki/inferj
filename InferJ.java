@@ -87,7 +87,7 @@ public class InferJ {
         }
 
         TensorIt it() {
-            return it(continousDims());
+            return it(continuousDims());
         }
 
         public static Tensor ltm(int side) {
@@ -130,7 +130,7 @@ public class InferJ {
                 op2.eval();
             switch (op) {
                 case MAT_MUL -> _matmul(op1, op2);
-                case MAT_ADD -> _add(op1, op2, 0);
+                case MAT_ADD -> _add(op1, op2);
                 case SCALAR_MUL -> _apply(op1, x -> x * (float) cookie);
                 case SELECT -> _select(op1, op2);
                 case LAYER_NORM -> _layer_norm(op1, op2, (float) cookie);
@@ -184,7 +184,7 @@ public class InferJ {
 
                 // either equal or one of them 1
                 if (xd != yd && xd != 1 && yd != 1)
-                    throw new IllegalArgumentException("matrix dimension don't allow broadcast");
+                    throw new IllegalArgumentException("matrix dimension doesn't allow broadcast");
 
                 rdim1[ri] = rdim2[ri] = Math.max(xd, yd);
 
@@ -200,7 +200,7 @@ public class InferJ {
             };
         }
 
-        private int continousDims() {
+        private int continuousDims() {
             for (int i = dims.length - 1, c = 0; i > 0; i--, c++) {
                 if (strides[i - 1] != strides[i] * dims[i])
                     return c;
@@ -332,7 +332,10 @@ public class InferJ {
                 int[] rng = new_dims[i];
                 switch (rng.length) {
                     case 0 -> rng = new int[]{0, dims[i]};
-                    case 1 -> rng = new int[]{rng[0], rng[0] + 1};
+                    case 1 -> {
+                        if (rng[0] < 0) rng[0] += dim(i);
+                        rng = new int[]{rng[0], rng[0] + 1};
+                    }
                 }
                 _new_dims[i] = rng[1] - rng[0];
                 new_offset += rng[0] * strides[i];
@@ -503,7 +506,7 @@ public class InferJ {
                 index = index.transpose(i, i + 1);
             }
 
-            int maxCDims = t.continousDims();
+            int maxCDims = t.continuousDims();
             TensorIt sIt = t.it(1), vIt = values.it(1), iIt = index.it(1);
             float[] buf = new float[t.dim(-1)];
             while (sIt.hasNext() && vIt.hasNext() && iIt.hasNext()) {
@@ -537,7 +540,7 @@ public class InferJ {
         }
 
         private void _contiguous(Tensor x) {
-            int maxContDims = x.continousDims();
+            int maxContDims = x.continuousDims();
             TensorIt xIt = x.it(maxContDims), rIt = this.it(maxContDims);
             while (xIt.hasNext() && rIt.hasNext()) {
                 Tensor xx = xIt.next(), rr = rIt.next();
@@ -556,7 +559,7 @@ public class InferJ {
             eval();
             src.eval();
             Tensor[] t = broadcast_dims(this, src, 0);
-            int maxCont = Math.min(t[0].continousDims(), t[1].continousDims());
+            int maxCont = Math.min(t[0].continuousDims(), t[1].continuousDims());
             TensorIt tgtIt = t[0].it(maxCont), srcIt = t[1].it(maxCont);
             while (tgtIt.hasNext() && srcIt.hasNext()) {
                 Tensor ss = srcIt.next(), tt = tgtIt.next();
@@ -570,8 +573,8 @@ public class InferJ {
             return new Tensor(a, b, Op.MAT_ADD, new float[a.size()], 0, null, true, null, a.dims);
         }
 
-        private void _add(Tensor x, Tensor y, int dim) {
-            int contDims = Math.min(x.continousDims(), y.continousDims());
+        private void _add(Tensor x, Tensor y) {
+            int contDims = Math.min(x.continuousDims(), y.continuousDims());
             TensorIt xIt = x.it(contDims), yIt = y.it(contDims), rIt = this.it(contDims);
             if (contDims > 0) {
                 while (xIt.hasNext() && yIt.hasNext() && rIt.hasNext()) {
@@ -792,7 +795,7 @@ public class InferJ {
         }
 
         private void _apply(Tensor x, Function<Float, Float> f) {
-            int contDims = x.continousDims();
+            int contDims = x.continuousDims();
             TensorIt xIt = x.it(contDims), rIt = this.it(contDims);
             if (contDims == 0) {
                 while (xIt.hasNext()) {
@@ -812,7 +815,7 @@ public class InferJ {
             return new Tensor(this, null, Op.SCALAR_MUL, new float[size()], 0, scalar, true, null, dims);
         }
 
-        float sqrt_2_by_pi = (float) Math.sqrt(2.0 / Math.PI);
+        final static float sqrt_2_by_pi = (float) Math.sqrt(2.0 / Math.PI);
 
         public Tensor gelu() {
             return new Tensor(this, null, Op.GELU, new float[size()], offset, null, true, null, dims);
@@ -857,7 +860,7 @@ public class InferJ {
     InferJ(String modelDir) throws IOException {
         tokenizerInit(modelDir + "/merges.txt", modelDir + "/vocab.json");
         loadTensors(modelDir + "/model.safetensors");
-        loadMeta(modelDir + "/config.json");
+        meta = MiniJson.parse(new FileReader(modelDir + "/config.json"), Meta.class);
     }
 
 
@@ -977,8 +980,6 @@ public class InferJ {
             }
             return value;
         }
-
-        // --- Internal Parsing Logic ---
 
         private void next() {
             try {
@@ -1168,30 +1169,21 @@ public class InferJ {
         try (RandomAccessFile rf = new RandomAccessFile(modelFile, "r");
              FileChannel fc = rf.getChannel()) {
             MappedByteBuffer map = fc.map(FileChannel.MapMode.READ_ONLY, 0, fc.size());
-            ByteBuffer buf = map.order(ByteOrder.LITTLE_ENDIAN);
+            map.order(ByteOrder.LITTLE_ENDIAN);
             long headerLen = map.asLongBuffer().get();
             byte hbuf[] = new byte[(int) headerLen];
             map.get(8, hbuf);
             Map metadata = MiniJson.parse(new String(hbuf), Map.class);
-
-            Map<String, Integer> dTypeSz = new HashMap<>() {
-                {
-                    put("FP32", 4);
-                }
-            };
-
-            int dataBase = (int) (8 + headerLen);
 
             metadata.forEach((k, v) -> {
                 String key = (String) k;
                 if (key.equals("__metadata__"))
                     return;
 
-                String dType = (String) ((Map) v).get("dtype");
                 ArrayList<Long> shape = (ArrayList<Long>) ((Map) v).get("shape");
                 ArrayList<Long> range = (ArrayList<Long>) ((Map) v).get("data_offsets");
 
-                int start = dataBase + range.get(0).intValue();
+                int start = (int) (8 + headerLen) + range.get(0).intValue();
                 int len = (int) (range.get(1) - range.get(0));
                 FloatBuffer fb = map.slice(start, len).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer();
                 float[] fbuf = new float[fb.remaining()];
@@ -1202,21 +1194,11 @@ public class InferJ {
                     shapes[i] = shape.get(i).intValue();
                 tensors.put(key, Tensor.of(fbuf, shapes).withName(key));
             });
-
         }
-
-    }
-
-    void loadMeta(String metaFile) throws FileNotFoundException {
-        meta = MiniJson.parse(new FileReader(metaFile), Meta.class);
     }
 
     Tensor TG(String name) {
         return tensors.get(name);
-    }
-
-    Tensor makeGpt2Graph() {
-        return null;
     }
 
     interface TokenReporter {
@@ -1229,43 +1211,52 @@ public class InferJ {
         int MAX_BATCHES = 4;
         var mask = Tensor.ltm(meta.n_ctx);
         var allEmbeddings = TG("wte.weight");
-        var inputs = Tensor.of(MAX_BATCHES, meta.n_ctx, meta.n_embd);
+
+        // KV cache
+        var K = Tensor.of(meta.n_layer, MAX_BATCHES, meta.n_ctx, meta.n_embd);
+        var V = Tensor.of(meta.n_layer, MAX_BATCHES, meta.n_ctx, meta.n_embd);
 
         float[] tokens = tokenize(prompt);
         int B = 1, T = tokens.length, C = meta.n_embd;
         var indices = Tensor.of(tokens, B, T).withName("input_tokens");
 
-        long time = 0;
+        var time = 0L;
 
         for (int processedT = 0, it = 0; T < maxTokens + tokens.length; T++, it++) {
 
-            long start = System.currentTimeMillis();
-            Tensor add = allEmbeddings.select(indices).add(TG("wpe.weight").slice($(processedT, T), $()));
-            inputs.slice($(0, B), $(processedT, T), $()).copyFrom(add);
-            var cur = inputs.slice($(0, B), $(0, T), $());
-            processedT = T;
+            var start = System.currentTimeMillis();
+            var cur = allEmbeddings.select(indices).add(TG("wpe.weight").slice($(processedT, T), $()));
 
             for (int i = 0; i < meta.n_layer; i++) {
 
                 var ln1_wb = cur.layerNorm(TG("h." + i + ".ln_1.weight"), meta.layer_norm_epsilon);
                 var ln1 = ln1_wb.add(TG("h." + i + ".ln_1.bias").view(1, -1));
 
-                var c_attn = ln1.matmul(TG("h." + i + ".attn.c_attn.weight")).add(TG("h." + i + ".attn.c_attn.bias"));
+                var c_attn = ln1.matmul(TG("h." + i + ".attn.c_attn.weight"))
+                        .add(TG("h." + i + ".attn.c_attn.bias"));
 
                 Tensor[] qkv = c_attn.split(3, 2);
                 Tensor q = qkv[0], k = qkv[1], v = qkv[2];
 
-                q = q.view(B, T, meta.n_head, C / meta.n_head).transpose(1, 2);
-                k = k.view(B, T, meta.n_head, C / meta.n_head).transpose(1, 2);
-                v = v.view(B, T, meta.n_head, C / meta.n_head).transpose(1, 2);
+                // copy new k-v to cache
+                K.sub(i).slice($(0, B), $(processedT, T), $()).copyFrom(k);
+                V.sub(i).slice($(0, B), $(processedT, T), $()).copyFrom(v);
+
+                // now change the current k and v for 0:T
+                k = K.sub(i).slice($(0, B), $(0, T), $());
+                v = V.sub(i).slice($(0, B), $(0, T), $());
+
+                q = q.view(B, -1, meta.n_head, C / meta.n_head).transpose(1, 2);
+                k = k.view(B, -1, meta.n_head, C / meta.n_head).transpose(1, 2);
+                v = v.view(B, -1, meta.n_head, C / meta.n_head).transpose(1, 2);
 
                 var qkt = q.matmul(k.transpose(2, 3));
                 qkt = qkt.multiply((float) (1f / Math.sqrt((double) C / meta.n_head)));
-                qkt = qkt.maskedFill(mask, Float.NEGATIVE_INFINITY);
+                qkt = qkt.maskedFill(mask.slice($(processedT, T), $()), Float.NEGATIVE_INFINITY);
 
                 var oWeights = qkt.softMax(3);
 
-                var x = oWeights.matmul(v).transpose(1, 2).contiguous().view(B, T, C);
+                var x = oWeights.matmul(v).transpose(1, 2).contiguous().view(B, -1, C);
 
                 var proj = x.matmul(TG("h." + i + ".attn.c_proj.weight"))
                         .add(TG("h." + i + ".attn.c_proj.bias"));
@@ -1286,7 +1277,7 @@ public class InferJ {
                 cur = cur.add(cproj);
             }
 
-            var lnf = cur.slice($(), $(T - 1), $()).layerNorm(TG("ln_f.weight"), meta.layer_norm_epsilon)
+            var lnf = cur.slice($(), $(-1), $()).layerNorm(TG("ln_f.weight"), meta.layer_norm_epsilon)
                     .add(TG("ln_f.bias").view(1, -1));
 
             var top_k_i = lnf
@@ -1305,6 +1296,8 @@ public class InferJ {
                 int next = (int) indices.get(0, 0);
                 reporter.onToken(i, next, (float) it * 1000 / time);
             }
+
+            processedT = T;
         }
     }
 
@@ -1321,8 +1314,8 @@ public class InferJ {
         String prompt = findArg(args, "prompt", "once upon a time there");
         int maxTokens = Integer.parseInt(findArg(args, "max-tokens", "100"));
         float topP = Float.parseFloat(findArg(args, "top-p", "1.0"));
-        int topK = Integer.parseInt(findArg(args, "top-k", "5"));
-        float temp = Float.parseFloat(findArg(args, "temp", "1.3"));
+        int topK = Integer.parseInt(findArg(args, "top-k", "1"));
+        float temp = Float.parseFloat(findArg(args, "temp", "1"));
 
         final StringBuilder sb = new StringBuilder(prompt);
         InferJ gpt2 = new InferJ(modelDir);
