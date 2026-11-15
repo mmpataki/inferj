@@ -15,6 +15,7 @@ safetensors loading, tokenizer, and GPT-2 forward pass all live in
 - `config.json`, `merges.txt`, and `vocab.json`
 - Byte-pair encoding tokenization
 - Temperature-scaled top-k multinomial sampling
+- KV cache for attention keys and values
 - A lightweight tensor implementation for matmul, softmax, layer norm, GELU,
   slicing, transpose, view, split, and broadcasting
 
@@ -22,7 +23,6 @@ safetensors loading, tokenizer, and GPT-2 forward pass all live in
 
 - CPU only
 - Batch size 1
-- No KV cache
 - The safetensors loader assumes FP32 tensors
 - `--top-p` is not supported yet
 
@@ -95,7 +95,8 @@ You can override the defaults with environment variables such as `PROMPT`,
 
 | Project | Prompt | Gen tokens | Throughput | Notes |
 | --- | --- | --- | --- | --- |
-| InferJ | `once upon a time there` | 10 | `0.254130 tok/s` | Current Java implementation in this repo |
+| InferJ (before KV cache) | `once upon a time there` | 10 | `0.254130 tok/s` | Original implementation, recomputes attention over the whole sequence |
+| InferJ (KV cache) | `once upon a time there` | longer run | `~2.75 tok/s` | Current implementation; rate it saturates at after JVM warmup |
 | llama.cpp | `once upon a time there` | 10 | `31.7 tok/s` | `llama-cli` on CPU reported `Prompt: 646.7 t/s` and `Generation: 31.7 t/s` |
 
 Update this table as the implementation improves.
